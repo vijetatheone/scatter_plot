@@ -1,6 +1,7 @@
-dash
-dash-bootstrap-components
-pandas
+dash==2.16.1
+dash-bootstrap-components==1.6.0
+pandas==2.2.2
+plotly==5.24.1
+gunicorn==21.2.0
 numpy
-plotly
 openpyxl
