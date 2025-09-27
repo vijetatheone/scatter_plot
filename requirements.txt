@@ -1,7 +1,7 @@
 dash==2.16.1
 dash-bootstrap-components==1.6.0
-pandas==2.2.2
-plotly==5.24.1
+pandas==2.2.2 --only-binary :all:
+numpy==1.26.4 --only-binary :all:
+openpyxl==3.1.5
+plotly==5.24.1 --only-binary :all:
 gunicorn==21.2.0
-numpy
-openpyxl
