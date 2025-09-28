@@ -27,6 +27,8 @@ merged_df = scores_df.merge(rubrics_df, on=['Section', 'Attribute'], how='left')
 
 # ---- Dash App ----
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
+
+server = app.server
 app.title = "UX Dashboard with Industry Filter"
 
 # ---- Chart Functions ----
