@@ -162,6 +162,8 @@ def make_rubric_cards():
 # ---- Layout ----
 app.layout = dbc.Container([
     html.H2("Benchmark UX Dashboard", className="mt-3 text-center"),
+    dcc.Store(id="screen-width"),
+    dcc.Interval(id="resize-listener", interval=2000, n_intervals=0),
 
     # Industry + Section in one row
     dbc.Row([
@@ -254,6 +256,15 @@ def toggle_modal(n, is_open):
     if n:
         return not is_open
     return is_open
+app.clientside_callback(
+    """
+    function(n) {
+        return window.innerWidth;
+    }
+    """,
+    Output("screen-width", "data"),
+    Input("resize-listener", "n_intervals")
+)
 
 # ---- Run ----
 if __name__ == "__main__":
