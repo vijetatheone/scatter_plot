@@ -298,7 +298,7 @@ def analyze():
                 {"role": "system", "content": "You are a UX benchmarking expert."},
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": image_url}
+                    {"type": "image_url", "image_url": {"url": image_url}}
                 ]}
             ]
         )
