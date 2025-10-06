@@ -4,12 +4,16 @@ import numpy as np
 import plotly.express as px
 from dash import Dash, dcc, html, Output, Input, State, ctx, ALL
 import dash_bootstrap_components as dbc
+from flask import request, jsonify
+from openai import OpenAI
+import json
 
 # ---- Load Data ----
 # ---- Load Data ----
 SCORES_FILE = "Percentile_check.xlsx"        # Industry, Section, Attribute, Brand, Score, Reason
 RUBRICS_FILE = "Score Conditions.xlsx"       # Section, Attribute, Scoring Rubric (0–5), Details
 
+client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 scores_df = pd.read_excel(SCORES_FILE)
 rubrics_df = pd.read_excel(RUBRICS_FILE)
 
@@ -265,6 +269,63 @@ app.clientside_callback(
     Output("screen-width", "data"),
     Input("resize-listener", "n_intervals")
 )
+
+@server.route("/analyze", methods=["POST"])
+def analyze():
+    data = request.get_json()
+    brand = data.get("brand")
+    industry = data.get("industry")
+    section = data.get("section")
+    image_url = data.get("image_url")
+
+    if not all([brand, industry, section, image_url]):
+        return jsonify({"error": "Missing one or more required fields"}), 400
+
+    prompt = f"""
+    You are a UX design evaluator for the {industry} industry.
+    Analyze the uploaded screenshot of a {section} page and rate the following attributes 0–5,
+    using the official rubric provided earlier. Return JSON strictly in this format:
+    [
+      {{"Attribute": "Hero Banner", "Score": 4, "Reason": "Visually appealing hero with CTA"}},
+      ...
+    ]
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a UX benchmarking expert."},
+                {"role": "user", "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": image_url}
+                ]}
+            ]
+        )
+        content = response.choices[0].message.content
+        gpt_scores = json.loads(content)
+
+        # Convert GPT output → DataFrame and append to dataset
+        new_data = pd.DataFrame([
+            {
+                "Industry": industry,
+                "Section": section,
+                "Brand": brand,
+                "Attribute": item["Attribute"],
+                "Score": float(item["Score"]),
+                "Reason": item.get("Reason", "")
+            }
+            for item in gpt_scores
+        ])
+
+        global merged_df
+        merged_df = pd.concat([merged_df, new_data], ignore_index=True)
+
+        return jsonify({"status": "ok", "brand": brand, "industry": industry, "section": section})
+
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
 
 # ---- Run ----
 if __name__ == "__main__":
