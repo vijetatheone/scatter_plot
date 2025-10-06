@@ -302,8 +302,25 @@ def analyze():
                 ]}
             ]
         )
-        content = response.choices[0].message.content
-        gpt_scores = json.loads(content)
+        
+        content = response.choices[0].message.content.strip()
+
+        # Try to extract JSON safely even if GPT adds text
+        try:
+            start = content.find('[')
+            end = content.rfind(']')
+            if start != -1 and end != -1:
+                json_str = content[start:end+1]
+                gpt_scores = json.loads(json_str)
+            else:
+                raise ValueError("No JSON array found in GPT response")
+        except Exception as e:
+            return jsonify({
+                "error": f"Failed to parse GPT output",
+                "raw_content": content,
+                "exception": str(e)
+            }), 500
+
 
         # Convert GPT output → DataFrame and append to dataset
         new_data = pd.DataFrame([
