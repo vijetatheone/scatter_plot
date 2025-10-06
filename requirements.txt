@@ -5,3 +5,4 @@ numpy==2.3.2 --only-binary :all:
 openpyxl==3.1.5
 plotly==5.24.1 --only-binary :all:
 gunicorn==21.2.0
+openai
