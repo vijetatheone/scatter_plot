@@ -234,13 +234,65 @@ def report_status():
 def temp_report():
     job_id = request.args.get("job_id")
     temp_path = os.path.join(TEMP_DIR, f"{job_id}.json")
+
     if not os.path.exists(temp_path):
-        return jsonify({"error":"Report not ready"}), 404
+        return jsonify({"error": "Report not ready"}), 404
+
     with open(temp_path) as f:
         data = json.load(f)
+
     brand, industry, section = data.get("brand"), data.get("industry"), data.get("section")
-    global merged_df
-    return make_overall_chart(industry, section, highlight_brand=brand).to_html(full_html=True)
+    scores = data.get("scores", [])
+
+    # --- Create temporary DataFrame for uploaded brand ---
+    temp_df = pd.DataFrame(scores)
+    temp_df["Industry"] = industry
+    temp_df["Section"] = section
+    temp_df["Brand"] = brand
+
+    # --- Append temporarily to merged_df for visualization ---
+    viz_df = pd.concat([merged_df, temp_df], ignore_index=True)
+    viz_df = viz_df.merge(rubrics_df, on=["Section", "Attribute"], how="left")
+
+    # --- Generate both charts ---
+    overall_fig = make_overall_chart(industry, section, highlight_brand=brand)
+    attr_fig = make_attribute_chart(industry, section, highlight_brand=brand)
+
+    # --- Combine both charts into one HTML page ---
+    html_page = f"""
+    <html>
+      <head>
+        <title>{industry} – {section} Report</title>
+        <meta charset="UTF-8">
+        <style>
+          body {{
+            font-family: Inter, sans-serif;
+            margin: 20px;
+            background: #fff;
+            color: #0a2239;
+          }}
+          h2 {{
+            margin-bottom: 10px;
+          }}
+          iframe {{
+            width: 100%;
+            height: 600px;
+            border: none;
+            margin-bottom: 40px;
+          }}
+        </style>
+      </head>
+      <body>
+        <h2>{industry} — {section} (Brand: {brand})</h2>
+        <h3>Overall Performance</h3>
+        {overall_fig.to_html(full_html=False, include_plotlyjs='cdn')}
+        <h3>Attribute-wise Performance</h3>
+        {attr_fig.to_html(full_html=False, include_plotlyjs=False)}
+      </body>
+    </html>
+    """
+
+    return html_page
 
 # ---- Run ----
 if __name__ == "__main__":
