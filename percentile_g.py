@@ -7,85 +7,94 @@ import dash_bootstrap_components as dbc
 from flask import request, jsonify
 from openai import OpenAI
 import json
+import urllib.parse
 
-# ---- Load Data ----
-# ---- Load Data ----
+# === CONFIGURATION ===
 SCORES_FILE = "Percentile_check.xlsx"        # Industry, Section, Attribute, Brand, Score, Reason
 RUBRICS_FILE = "Score Conditions.xlsx"       # Section, Attribute, Scoring Rubric (0–5), Details
 
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+
+# === LOAD DATA ===
 scores_df = pd.read_excel(SCORES_FILE)
 rubrics_df = pd.read_excel(RUBRICS_FILE)
 
-# Ensure Reason column exists
 if "Reason" not in scores_df.columns:
     scores_df["Reason"] = ""
 
-# ✅ Include Industry + merge with rubric details
-scores_df = scores_df[['Industry','Section','Attribute','Brand','Score','Reason']].dropna()
-rubrics_df = rubrics_df[['Section','Attribute','Scoring Rubric (0–5)','Details']].dropna()
+scores_df = scores_df[['Industry', 'Section', 'Attribute', 'Brand', 'Score', 'Reason']].dropna()
+rubrics_df = rubrics_df[['Section', 'Attribute', 'Scoring Rubric (0–5)', 'Details']].dropna()
 
-merged_df = scores_df.merge(rubrics_df, on=['Section','Attribute'], how='left')
+merged_df = scores_df.merge(rubrics_df, on=['Section', 'Attribute'], how='left')
 
 industries = sorted(scores_df['Industry'].unique())
 sections = sorted(scores_df['Section'].unique())
 
-# Merge rubrics
-#merged_df = scores_df.merge(rubrics_df, on=['Section', 'Attribute'], how='left')
-
-# ---- Dash App ----
+# === DASH APP ===
 app = Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP])
 server = app.server
 app.title = "UX Dashboard with Industry Filter"
 
-# ---- Chart Functions ----
-def make_overall_chart(industry, section):
-    sdf = merged_df[(merged_df['Industry']==industry) & (merged_df['Section']==section)]
+
+# === HELPER: RELOAD DATA ===
+def reload_data():
+    global scores_df, merged_df, industries, sections
+    scores_df = pd.read_excel(SCORES_FILE)
+    if "Reason" not in scores_df.columns:
+        scores_df["Reason"] = ""
+    scores_df = scores_df[['Industry', 'Section', 'Attribute', 'Brand', 'Score', 'Reason']].dropna()
+    merged_df = scores_df.merge(rubrics_df, on=['Section', 'Attribute'], how='left')
+    industries = sorted(scores_df['Industry'].unique())
+    sections = sorted(scores_df['Section'].unique())
+
+
+# === CHART FUNCTIONS ===
+def make_overall_chart(industry, section, highlight_brand=None):
+    sdf = merged_df[(merged_df['Industry'] == industry) & (merged_df['Section'] == section)]
     if sdf.empty:
         return px.scatter(title=f"No data for {industry} — {section}")
 
     overall = sdf.groupby("Brand", as_index=False)['Score'].mean()
-
-    # jitter slightly but clip to 0–5
-    overall['ScorePlot'] = np.clip(
-        overall['Score'] + np.random.uniform(-0.1, 0.1, len(overall)),
-        0, 5
-    )
+    overall['ScorePlot'] = np.clip(overall['Score'] + np.random.uniform(-0.1, 0.1, len(overall)), 0, 5)
 
     fig = px.scatter(
         overall,
-        x="ScorePlot", y=[0]*len(overall),
+        x="ScorePlot", y=[0] * len(overall),
         hover_name="Brand",
-        hover_data={"Score":":.2f"},
+        hover_data={"Score": ":.2f"},
         color="Score",
         color_continuous_scale="RdYlGn",
-        range_color=[0,5],
-        range_x=[0,5],
+        range_color=[0, 5],
+        range_x=[0, 5],
         title=f"{industry} — {section} Overall Brand Scores"
     )
 
+    # Highlight uploaded brand
+    if highlight_brand and highlight_brand in overall["Brand"].values:
+        highlight = overall[overall["Brand"] == highlight_brand]
+        fig.add_scatter(
+            x=highlight["ScorePlot"],
+            y=[0],
+            mode="markers+text",
+            text=highlight["Brand"],
+            textposition="top center",
+            marker=dict(size=22, color="red", line=dict(width=2, color="black")),
+            name=f"Highlighted: {highlight_brand}"
+        )
+
     fig.update_traces(marker=dict(size=14, line=dict(width=1, color='black')))
     fig.update_yaxes(showticklabels=False, title=None)
-    fig.update_xaxes(
-        title="Score",
-        tickmode="array",
-        tickvals=[0,1,2,3,4,5],
-        ticktext=["0","1","2","3","4","5"]
-    )
-    fig.update_layout(
-        plot_bgcolor="white", paper_bgcolor="white",
-        coloraxis_showscale=False,
-        margin=dict(l=20,r=20,t=50,b=40)
-    )
+    fig.update_xaxes(title="Score", tickmode="array", tickvals=[0, 1, 2, 3, 4, 5])
+    fig.update_layout(plot_bgcolor="white", paper_bgcolor="white", coloraxis_showscale=False,
+                      margin=dict(l=20, r=20, t=50, b=40))
     return fig
 
 
-def make_attribute_chart(industry, section):
-    sdf = merged_df[(merged_df['Industry']==industry) & (merged_df['Section']==section)].copy()
+def make_attribute_chart(industry, section, highlight_brand=None):
+    sdf = merged_df[(merged_df['Industry'] == industry) & (merged_df['Section'] == section)].copy()
     if sdf.empty:
         return px.scatter(title=f"No data for {industry} — {section}")
 
-    # ✅ Use Details column for one-liner
     def format_label(attr, detail):
         if pd.notna(detail) and str(detail).strip():
             return f"{attr}<br><span style='font-size:12px; color:gray;'>{detail}</span>"
@@ -93,83 +102,66 @@ def make_attribute_chart(industry, section):
             return attr
 
     sdf['AttrLabel'] = sdf.apply(lambda x: format_label(x['Attribute'], x['Details']), axis=1)
+    sdf['ScorePlot'] = np.clip(sdf['Score'] + np.random.uniform(-0.2, 0.2, len(sdf)), 0, 5)
 
-    # ✅ Jitter and clip inside 0–5
-    sdf['ScorePlot'] = np.clip(
-        sdf['Score'] + np.random.uniform(-0.2, 0.2, len(sdf)),
-        0, 5
+    order = rubrics_df[rubrics_df['Section'] == section]['Attribute'].tolist()
+    sdf['AttrLabel'] = pd.Categorical(
+        sdf['AttrLabel'],
+        categories=[format_label(a, d) for a, d in rubrics_df[rubrics_df['Section'] == section][['Attribute', 'Details']].values],
+        ordered=True
     )
-
-    # ✅ Keep Excel order of attributes
-    order = rubrics_df[rubrics_df['Section']==section]['Attribute'].tolist()
-    sdf['AttrLabel'] = pd.Categorical(sdf['AttrLabel'], 
-                                      categories=[format_label(a, d) for a,d in 
-                                                  rubrics_df[rubrics_df['Section']==section][['Attribute','Details']].values],
-                                      ordered=True)
 
     fig = px.scatter(
         sdf,
         x="ScorePlot", y="AttrLabel",
         hover_name="Brand",
-        hover_data={"Score":":.2f","Reason":True},
+        hover_data={"Score": ":.2f", "Reason": True},
         color="Score",
         color_continuous_scale="RdYlGn",
-        range_color=[0,5],
+        range_color=[0, 5],
         title=f"{industry} — {section} Attribute Scores",
-        height=max(500, 90*len(order))  # more height per attribute
+        height=max(500, 90 * len(order))
     )
 
-    fig.update_traces(marker=dict(size=14, line=dict(width=1, color='black')))
+    # Highlight uploaded brand
+    if highlight_brand and highlight_brand in sdf["Brand"].values:
+        highlight = sdf[sdf["Brand"] == highlight_brand]
+        fig.add_scatter(
+            x=highlight["ScorePlot"],
+            y=highlight["AttrLabel"],
+            mode="markers+text",
+            text=highlight["Brand"],
+            textposition="top center",
+            marker=dict(size=22, color="red", line=dict(width=2, color="black")),
+            name=f"Highlighted: {highlight_brand}"
+        )
 
-    # ✅ Horizontal row-bands
     for i, attr in enumerate(order):
         fig.add_hrect(
-            y0=i-0.5, y1=i+0.5,
+            y0=i - 0.5, y1=i + 0.5,
             fillcolor="rgba(240,240,240,0.3)" if i % 2 == 0 else "rgba(255,255,255,0)",
             layer="below", line_width=0
         )
 
     fig.update_layout(
-        yaxis=dict(title=None, categoryorder="array", categoryarray=[format_label(a, d) for a,d in rubrics_df[rubrics_df['Section']==section][['Attribute','Details']].values]),
-        xaxis=dict(
-            title="Score",
-            range=[-0.2, 5.3],
-            tickmode="array",
-            tickvals=[0,1,2,3,4,5],
-            ticktext=["0","1","2","3","4","5"]
-        ),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        coloraxis_showscale=False,
-        margin=dict(l=80,r=80,t=50,b=40)
+        yaxis=dict(title=None, categoryorder="array",
+                   categoryarray=[format_label(a, d) for a, d in
+                                  rubrics_df[rubrics_df['Section'] == section][['Attribute', 'Details']].values]),
+        xaxis=dict(title="Score", range=[-0.2, 5.3], tickmode="array", tickvals=[0, 1, 2, 3, 4, 5]),
+        plot_bgcolor="white", paper_bgcolor="white", coloraxis_showscale=False,
+        margin=dict(l=80, r=80, t=50, b=40)
     )
 
     return fig
 
 
-
-
-def make_rubric_cards():
-    cards = []
-    for _, row in rubrics_df.iterrows():
-        card = dbc.Card(
-            dbc.CardBody([
-                html.H5(row['Attribute'], className="card-title"),
-                html.H6(f"Section: {row['Section']}", className="card-subtitle text-muted"),
-                html.P(row['Scoring Rubric (0–5)'], className="card-text")
-            ]),
-            className="mb-3 shadow-sm"
-        )
-        cards.append(card)
-    return dbc.Row([dbc.Col(cards, width=12)])
-
-# ---- Layout ----
+# === LAYOUT ===
 app.layout = dbc.Container([
     html.H2("Benchmark UX Dashboard", className="mt-3 text-center"),
     dcc.Store(id="screen-width"),
     dcc.Interval(id="resize-listener", interval=2000, n_intervals=0),
+    dcc.Store(id="section-store", data=sections[0]),
 
-    # Industry + Section in one row
     dbc.Row([
         dbc.Col([
             html.Label("Select Industry:"),
@@ -183,54 +175,34 @@ app.layout = dbc.Container([
         dbc.Col([
             html.Label("Select Section:"),
             dbc.ButtonGroup(
-                [dbc.Button(s,
-                            id={"type":"section-btn","index":s},
-                            outline=True, color="primary",
-                            className="mx-1 rounded-pill") for s in sections],
+                [dbc.Button(s, id={"type": "section-btn", "index": s},
+                            outline=True, color="primary", className="mx-1 rounded-pill")
+                 for s in sections],
                 className="mb-2"
             )
         ], width=6)
     ], className="my-2"),
 
-    # Right-aligned scoring details button
     html.Div([
         dbc.Button("View Scoring Details", id="details-btn", color="secondary")
-    ], style={"textAlign":"right", "marginBottom":"15px"}),
+    ], style={"textAlign": "right", "marginBottom": "15px"}),
 
-    # Overall Performance card
-    dbc.Card(
-        dbc.CardBody([
-            html.H4("Overall Performance"),
-            dcc.Graph(id="overall-graph")
-        ]),
-        className="mb-4 shadow-sm p-3"
-    ),
+    dbc.Card(dbc.CardBody([html.H4("Overall Performance"), dcc.Graph(id="overall-graph")]),
+             className="mb-4 shadow-sm p-3"),
 
-    # Attribute Performance card
-    dbc.Card(
-        dbc.CardBody([
-            html.H4("Attribute Performance"),
-            dcc.Graph(id="attr-graph")
-        ]),
-        className="mb-4 shadow-sm p-3"
-    ),
+    dbc.Card(dbc.CardBody([html.H4("Attribute Performance"), dcc.Graph(id="attr-graph")]),
+             className="mb-4 shadow-sm p-3"),
 
-    # Modal for scoring details
-    dbc.Modal(
-        [
-            dbc.ModalHeader(dbc.ModalTitle("Scoring Rubric Reference")),
-            dbc.ModalBody(make_rubric_cards())
-        ],
-        id="details-modal",
-        is_open=False,
-        size="lg"
-    )
+    dbc.Modal([dbc.ModalHeader(dbc.ModalTitle("Scoring Rubric Reference")),
+               dbc.ModalBody(html.Div("Rubric details available in 'Score Conditions.xlsx'"))],
+              id="details-modal", is_open=False, size="lg")
 ], fluid=True)
 
-# ---- Callbacks ----
+
+# === CALLBACKS ===
 @app.callback(
-    Output("section-store","data"),
-    Input({"type":"section-btn","index":ALL},"n_clicks"),
+    Output("section-store", "data"),
+    Input({"type": "section-btn", "index": ALL}, "n_clicks"),
     prevent_initial_call=True
 )
 def update_section(n_clicks):
@@ -239,17 +211,19 @@ def update_section(n_clicks):
         return triggered["index"]
     return sections[0]
 
-# hidden store for section
-app.layout.children.insert(2, dcc.Store(id="section-store", data=sections[0]))
 
 @app.callback(
-    Output("overall-graph","figure"),
-    Output("attr-graph","figure"),
-    Input("industry-dd","value"),
-    Input("section-store","data")
+    Output("overall-graph", "figure"),
+    Output("attr-graph", "figure"),
+    Input("industry-dd", "value"),
+    Input("section-store", "data")
 )
 def update_charts(industry, section):
-    return make_overall_chart(industry, section), make_attribute_chart(industry, section)
+    query = request.environ.get("QUERY_STRING", "")
+    params = urllib.parse.parse_qs(query)
+    highlight = params.get("highlight", [None])[0]
+    return make_overall_chart(industry, section, highlight), make_attribute_chart(industry, section, highlight)
+
 
 @app.callback(
     Output("details-modal", "is_open"),
@@ -260,16 +234,9 @@ def toggle_modal(n, is_open):
     if n:
         return not is_open
     return is_open
-app.clientside_callback(
-    """
-    function(n) {
-        return window.innerWidth;
-    }
-    """,
-    Output("screen-width", "data"),
-    Input("resize-listener", "n_intervals")
-)
 
+
+# === /analyze ENDPOINT ===
 @app.server.route("/analyze", methods=["POST"])
 def analyze():
     try:
@@ -279,15 +246,13 @@ def analyze():
         section = data.get("section")
         image_url = data.get("image_url")
 
-        # === Load Scoring Conditions ===
-        rubric_df = pd.read_excel("Score Conditions.xlsx")
+        rubric_df = pd.read_excel(RUBRICS_FILE)
         rubric_df = rubric_df.dropna(subset=["Section", "Attribute", "Scoring Rubric (0–5)", "Details"])
-
         section_attrs = rubric_df[rubric_df["Section"].str.lower() == section.lower()]
+
         if section_attrs.empty:
             return jsonify({"error": f"No rubric found for section '{section}'"}), 400
 
-        # --- Create structured rubric text ---
         attr_text = "\n".join([
             f"Attribute: {row['Attribute']}\nScoring Rubric: {row['Scoring Rubric (0–5)']}\nDetails: {row['Details']}"
             for _, row in section_attrs.iterrows()
@@ -303,11 +268,9 @@ def analyze():
           {{'Industry': '{industry}', 'Section': '{section}', 'Attribute': '<attribute>', 'Brand': '{brand}', 'Score': <score>, 'Reason': '<reason>'}},
           ...
         ]
-
         {attr_text}
         """
 
-        # --- Call GPT ---
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -320,27 +283,30 @@ def analyze():
         )
 
         output = response.choices[0].message.content.strip()
-
         try:
             result_json = eval(output)
         except Exception:
             result_json = [{"Attribute": "ParseError", "Reason": output, "Score": None}]
 
-        # --- Save to master data (optional: append to Excel) ---
         df = pd.DataFrame(result_json)
         df["Industry"] = industry
         df["Section"] = section
         df["Brand"] = brand
 
-        # Save temporary JSON or Excel (for persistence)
-        df.to_excel(f"latest_{brand}_{section}.xlsx", index=False)
+        # ✅ Append new brand scores to the main file
+        existing = pd.read_excel(SCORES_FILE)
+        updated = pd.concat([existing, df], ignore_index=True)
+        updated.to_excel(SCORES_FILE, index=False)
+
+        reload_data()  # refresh global data for immediate dashboard update
 
         return jsonify({
             "status": "success",
             "brand": brand,
             "section": section,
             "industry": industry,
-            "scores": result_json
+            "scores": result_json,
+            "report_url": f"https://scatter-plot.onrender.com?industry={industry}&section={section}&highlight={brand}"
         })
 
     except Exception as e:
@@ -348,7 +314,7 @@ def analyze():
         return jsonify({"error": str(e)}), 500
 
 
-# ---- Run ----
+# === RUN APP ===
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8050))
     app.run(host="0.0.0.0", port=port, debug=False)
