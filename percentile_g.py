@@ -8,11 +8,16 @@ from flask import request, jsonify
 from openai import OpenAI
 import json
 import urllib.parse
+from flask import request, jsonify, render_template_string
+import uuid
+from datetime import datetime, timedelta
 
 # === CONFIGURATION ===
 SCORES_FILE = "Percentile_check.xlsx"        # Industry, Section, Attribute, Brand, Score, Reason
 RUBRICS_FILE = "Score Conditions.xlsx"       # Section, Attribute, Scoring Rubric (0–5), Details
-
+# global in-memory temporary reports
+temp_reports = {}
+TEMP_EXPIRY_MINUTES = 15
 client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 
 # === LOAD DATA ===
@@ -253,6 +258,7 @@ def analyze():
         if section_attrs.empty:
             return jsonify({"error": f"No rubric found for section '{section}'"}), 400
 
+        # Build rubric prompt text
         attr_text = "\n".join([
             f"Attribute: {row['Attribute']}\nScoring Rubric: {row['Scoring Rubric (0–5)']}\nDetails: {row['Details']}"
             for _, row in section_attrs.iterrows()
@@ -268,9 +274,11 @@ def analyze():
           {{'Industry': '{industry}', 'Section': '{section}', 'Attribute': '<attribute>', 'Brand': '{brand}', 'Score': <score>, 'Reason': '<reason>'}},
           ...
         ]
+
         {attr_text}
         """
 
+        # Call GPT
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
@@ -288,30 +296,95 @@ def analyze():
         except Exception:
             result_json = [{"Attribute": "ParseError", "Reason": output, "Score": None}]
 
-        df = pd.DataFrame(result_json)
-        df["Industry"] = industry
-        df["Section"] = section
-        df["Brand"] = brand
+        # Temporary DataFrame
+        df_temp = pd.DataFrame(result_json)
+        df_temp["Industry"] = industry
+        df_temp["Section"] = section
+        df_temp["Brand"] = brand
 
-        # ✅ Append new brand scores to the main file
-        existing = pd.read_excel(SCORES_FILE)
-        updated = pd.concat([existing, df], ignore_index=True)
-        updated.to_excel(SCORES_FILE, index=False)
+        # Store in-memory
+        key = str(uuid.uuid4())
+        temp_reports[key] = {
+            "data": df_temp,
+            "created_at": datetime.utcnow()
+        }
 
-        reload_data()  # refresh global data for immediate dashboard update
-
+        # Return link
         return jsonify({
             "status": "success",
             "brand": brand,
             "section": section,
             "industry": industry,
             "scores": result_json,
-            "report_url": f"https://scatter-plot.onrender.com?industry={industry}&section={section}&highlight={brand}"
+            "report_url": f"https://scatter-plot.onrender.com/temp_report?key={key}"
         })
 
     except Exception as e:
         print("❌ Error in /analyze:", e)
         return jsonify({"error": str(e)}), 500
+
+
+@app.server.route("/temp_report")
+def temp_report():
+    key = request.args.get("key")
+    if not key or key not in temp_reports:
+        return "⚠️ Report expired or invalid key.", 404
+
+    # Cleanup expired entries
+    now = datetime.utcnow()
+    expired = [k for k, v in temp_reports.items()
+               if now - v["created_at"] > timedelta(minutes=TEMP_EXPIRY_MINUTES)]
+    for k in expired:
+        del temp_reports[k]
+
+    df_temp = temp_reports[key]["data"]
+    industry = df_temp["Industry"].iloc[0]
+    section = df_temp["Section"].iloc[0]
+    brand = df_temp["Brand"].iloc[0]
+
+    # Merge with master dataset (no persistence)
+    combined = pd.concat([merged_df, df_temp], ignore_index=True)
+
+    # Pass this combined data to charts
+    # Add highlight logic
+    fig_overall = make_overall_chart(industry, section)
+    fig_attr = make_attribute_chart(industry, section)
+
+    # highlight logic - differentiate the temp brand bubble
+    for fig in [fig_overall, fig_attr]:
+        fig.update_traces(
+            marker=dict(
+                line=dict(width=1, color='black'),
+                opacity=0.8
+            )
+        )
+        fig.for_each_trace(
+            lambda trace: trace.update(marker_color='red')
+            if trace.name == brand else None
+        )
+
+    # Render inline HTML
+    html_content = f"""
+    <html>
+    <head>
+        <title>{brand} Temporary UX Report</title>
+        <script src="https://cdn.plot.ly/plotly-latest.min.js"></script>
+    </head>
+    <body style='font-family: Arial; margin:40px;'>
+        <h2>{brand} — {industry} / {section} Temporary Report</h2>
+        <div id='overall'></div>
+        <div id='attr'></div>
+        <p><i>This report is temporary and will auto-expire in {TEMP_EXPIRY_MINUTES} minutes.</i></p>
+        <script>
+            var overall = {fig_overall.to_json()};
+            var attr = {fig_attr.to_json()};
+            Plotly.newPlot('overall', overall.data, overall.layout);
+            Plotly.newPlot('attr', attr.data, attr.layout);
+        </script>
+    </body>
+    </html>
+    """
+    return render_template_string(html_content)
 
 
 # === RUN APP ===
