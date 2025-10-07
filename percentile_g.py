@@ -270,77 +270,81 @@ app.clientside_callback(
     Input("resize-listener", "n_intervals")
 )
 
-@server.route("/analyze", methods=["POST"])
+@app.server.route("/analyze", methods=["POST"])
 def analyze():
-    data = request.get_json()
-    brand = data.get("brand")
-    industry = data.get("industry")
-    section = data.get("section")
-    image_url = data.get("image_url")
-
-    if not all([brand, industry, section, image_url]):
-        return jsonify({"error": "Missing one or more required fields"}), 400
-
-    prompt = f"""
-    You are a UX design evaluator for the {industry} industry.
-    Analyze the uploaded screenshot of a {section} page and rate the following attributes 0–5,
-    using the official rubric provided earlier. Return JSON strictly in this format:
-    [
-      {{"Attribute": "Hero Banner", "Score": 4, "Reason": "Visually appealing hero with CTA"}},
-      ...
-    ]
-    """
-
     try:
+        data = request.get_json()
+        brand = data.get("brand")
+        industry = data.get("industry")
+        section = data.get("section")
+        image_url = data.get("image_url")
+
+        # === Load Scoring Conditions ===
+        rubric_df = pd.read_excel("Score Conditions.xlsx")
+        rubric_df = rubric_df.dropna(subset=["Section", "Attribute", "Scoring Rubric (0–5)", "Details"])
+
+        section_attrs = rubric_df[rubric_df["Section"].str.lower() == section.lower()]
+        if section_attrs.empty:
+            return jsonify({"error": f"No rubric found for section '{section}'"}), 400
+
+        # --- Create structured rubric text ---
+        attr_text = "\n".join([
+            f"Attribute: {row['Attribute']}\nScoring Rubric: {row['Scoring Rubric (0–5)']}\nDetails: {row['Details']}"
+            for _, row in section_attrs.iterrows()
+        ])
+
+        prompt = f"""
+        You are a UI/UX benchmarking evaluator for the {industry} industry.
+        Evaluate the uploaded webpage screenshot for the section: {section}.
+        Use ONLY the attributes and rubrics given below. 
+        Each attribute must receive one score (0–5) and a short reason.
+        Output strictly as JSON array in this exact structure:
+        [
+          {{'Industry': '{industry}', 'Section': '{section}', 'Attribute': '<attribute>', 'Brand': '{brand}', 'Score': <score>, 'Reason': '<reason>'}},
+          ...
+        ]
+
+        {attr_text}
+        """
+
+        # --- Call GPT ---
         response = client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a UX benchmarking expert."},
+                {"role": "system", "content": "You are a visual UX benchmarking evaluator."},
                 {"role": "user", "content": [
                     {"type": "text", "text": prompt},
                     {"type": "image_url", "image_url": {"url": image_url}}
                 ]}
             ]
         )
-        
-        content = response.choices[0].message.content.strip()
 
-        # Try to extract JSON safely even if GPT adds text
+        output = response.choices[0].message.content.strip()
+
         try:
-            start = content.find('[')
-            end = content.rfind(']')
-            if start != -1 and end != -1:
-                json_str = content[start:end+1]
-                gpt_scores = json.loads(json_str)
-            else:
-                raise ValueError("No JSON array found in GPT response")
-        except Exception as e:
-            return jsonify({
-                "error": f"Failed to parse GPT output",
-                "raw_content": content,
-                "exception": str(e)
-            }), 500
+            result_json = eval(output)
+        except Exception:
+            result_json = [{"Attribute": "ParseError", "Reason": output, "Score": None}]
 
+        # --- Save to master data (optional: append to Excel) ---
+        df = pd.DataFrame(result_json)
+        df["Industry"] = industry
+        df["Section"] = section
+        df["Brand"] = brand
 
-        # Convert GPT output → DataFrame and append to dataset
-        new_data = pd.DataFrame([
-            {
-                "Industry": industry,
-                "Section": section,
-                "Brand": brand,
-                "Attribute": item["Attribute"],
-                "Score": float(item["Score"]),
-                "Reason": item.get("Reason", "")
-            }
-            for item in gpt_scores
-        ])
+        # Save temporary JSON or Excel (for persistence)
+        df.to_excel(f"latest_{brand}_{section}.xlsx", index=False)
 
-        global merged_df
-        merged_df = pd.concat([merged_df, new_data], ignore_index=True)
-
-        return jsonify({"status": "ok", "brand": brand, "industry": industry, "section": section})
+        return jsonify({
+            "status": "success",
+            "brand": brand,
+            "section": section,
+            "industry": industry,
+            "scores": result_json
+        })
 
     except Exception as e:
+        print("❌ Error in /analyze:", e)
         return jsonify({"error": str(e)}), 500
 
 
